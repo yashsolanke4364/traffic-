@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
@@ -10,6 +8,7 @@ from sklearn.linear_model import LinearRegression
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import datetime
+import altair as alt
 
 # --- SETTINGS ---
 st.set_page_config(page_title="Urban Traffic Flow Ops", layout="wide", page_icon="🚦")
@@ -40,7 +39,7 @@ def load_and_preprocess_data():
     
     # For Lag (Simulating Lag by grouping)
     df = df.sort_values('date_time')
-    df['traffic_lag_1h'] = df['traffic_volume'].shift(1).fillna(method='bfill')
+    df['traffic_lag_1h'] = df['traffic_volume'].shift(1).bfill()
     
     return df
 
@@ -108,24 +107,24 @@ if page == "1️⃣ Dataset & EDA":
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Traffic vs Hour of Day")
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(data=df, x='hour', y='traffic_volume', estimator=np.median, ax=ax)
-        st.pyplot(fig)
+        hourly_data = df.groupby('hour')['traffic_volume'].median().reset_index()
+        st.line_chart(hourly_data, x='hour', y='traffic_volume')
         
     with col2:
         st.subheader("Weather vs Traffic Impact")
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.barplot(data=df, x='weather_main', y='traffic_volume', ax=ax)
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
+        weather_data = df.groupby('weather_main')['traffic_volume'].mean().reset_index()
+        st.bar_chart(weather_data, x='weather_main', y='traffic_volume')
 
     st.subheader("Heatmap: Day vs Hour Traffic")
-    # Pivot
-    heatmap_data = df.groupby(['day_of_week', 'hour'])['traffic_volume'].mean().unstack()
-    heatmap_data.index = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    fig, ax = plt.subplots(figsize=(10,4))
-    sns.heatmap(heatmap_data, cmap='inferno', ax=ax)
-    st.pyplot(fig)
+    day_hour_data = df.groupby(['day_of_week', 'hour'])['traffic_volume'].mean().reset_index()
+    day_map = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
+    day_hour_data['day_of_week'] = day_hour_data['day_of_week'].map(day_map)
+    heatmap = alt.Chart(day_hour_data).mark_rect().encode(
+        x='hour:O',
+        y=alt.Y('day_of_week:N', sort=['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']),
+        color=alt.Color('traffic_volume:Q', scale=alt.Scale(scheme='inferno'))
+    ).properties(height=400)
+    st.altair_chart(heatmap, use_container_width=True)
 
 # ----------------- PAGE 2: PREDICTION ENGINE -----------------
 elif page == "2️⃣ ML Prediction Engine":
