@@ -1,120 +1,130 @@
-import streamlit as st
+import os
 import pandas as pd
 import numpy as np
-import datetime
-import altair as alt
+from flask import Flask, jsonify, request, send_from_directory
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LinearRegression
 
-# --- SAFE IMPORTS ---
-try:
-    from sklearn.model_selection import train_test_split
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-except:
-    st.error("❌ scikit-learn is not installed. Add it to requirements.txt")
-    st.stop()
+app = Flask(__name__, static_folder='frontend')
 
-# Optional XGBoost
-try:
-    import xgboost as xgb
-    XGB_AVAILABLE = True
-except:
-    XGB_AVAILABLE = False
+# Global variables to store our ML artifacts in memory
+DATA = None
+PCA_MODEL = None
+LR_MODEL = None
+SCALER = None
+PCA_RESULT = None
 
-# --- SETTINGS ---
-st.set_page_config(page_title="Urban Traffic Flow Ops", layout="wide", page_icon="🚦")
-
-# --- DATA LOADING ---
-@st.cache_data
-def load_and_preprocess_data():
+def load_and_train():
+    global DATA, PCA_MODEL, LR_MODEL, SCALER, PCA_RESULT
+    
+    curr_dir = os.path.dirname(os.path.abspath(__file__))
+    data_path = os.path.join(curr_dir, 'dataset', 'traffic.csv')
     try:
-        url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00492/Metro_Interstate_Traffic_Volume.csv.gz"
-        df = pd.read_csv(url, compression='gzip')
-    except:
-        st.error("❌ Failed to load dataset (network issue).")
-        st.stop()
-
+        df = pd.read_csv(data_path)
+    except FileNotFoundError:
+        print("Dataset not found. Please place traffic.csv inside dataset/")
+        return
+        
+    # Feature Engineering for Metro Interstate Dataset
     df['date_time'] = pd.to_datetime(df['date_time'])
-    df['date'] = df['date_time'].dt.date
     df['hour'] = df['date_time'].dt.hour
-    df['day_of_week'] = df['date_time'].dt.dayofweek
-    df['month'] = df['date_time'].dt.month
+    df['temp_c'] = df['temp'] - 273.15  # Kelvin to Celsius
+    
+    df.fillna(df.mean(numeric_only=True), inplace=True)
+    DATA = df
 
-    df['is_peak_hour'] = df['hour'].apply(
-        lambda x: 1 if (8 <= x <= 11) or (17 <= x <= 21) else 0
-    )
-
-    df['day_type'] = df['day_of_week'].apply(
-        lambda x: 'Weekend' if x >= 5 else 'Working'
-    )
-
-    severity = {
-        'Clear': 0, 'Clouds': 1, 'Rain': 2, 'Drizzle': 2,
-        'Mist': 2, 'Haze': 2, 'Fog': 3, 'Snow': 4,
-        'Thunderstorm': 5, 'Squall': 5, 'Smoke': 4
-    }
-
-    df['weather_severity'] = df['weather_main'].map(severity).fillna(1)
-
-    df = df.sort_values('date_time')
-    df['traffic_lag_1h'] = df['traffic_volume'].shift(1).bfill()
-
-    return df
-
-# --- MODEL TRAINING ---
-@st.cache_resource
-def train_models(df):
-    features = [
-        'temp', 'rain_1h', 'snow_1h', 'clouds_all',
-        'hour', 'day_of_week', 'month',
-        'is_peak_hour', 'weather_severity', 'traffic_lag_1h'
-    ]
-
-    X = df[features]
+    # Features and Target
+    X = df[['hour', 'temp_c', 'clouds_all', 'rain_1h']]
     y = df['traffic_volume']
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    models = {
-        'Linear Regression': LinearRegression(),
-        'Random Forest': RandomForestRegressor(
-            n_estimators=50, random_state=42, n_jobs=1  # safer
-        )
+    
+    SCALER = StandardScaler()
+    X_scaled = SCALER.fit_transform(X) # Standardize the features
+    
+    PCA_MODEL = PCA(n_components=2)
+    pca_transformed = PCA_MODEL.fit_transform(X_scaled)
+    
+    # 1000 points sample so browser doesn't crash from 48000 points
+    sample_indices = np.random.choice(len(df), size=min(1000, len(df)), replace=False)
+    
+    PCA_RESULT = {
+        'pc1': pca_transformed[sample_indices, 0].tolist(),
+        'pc2': pca_transformed[sample_indices, 1].tolist(),
+        'variance_ratio': PCA_MODEL.explained_variance_ratio_.tolist()
     }
+    
+    # Train Linear Regressor
+    LR_MODEL = LinearRegression()
+    LR_MODEL.fit(X.values, y.values) 
+    print("Models retrained successfully on new Metro dataset!")
 
-    if XGB_AVAILABLE:
-        models['XGBoost'] = xgb.XGBRegressor(
-            n_estimators=50, random_state=42, n_jobs=1
-        )
+# Call it upon startup
+load_and_train()
 
-    trained_models = {}
-    metrics = {}
+@app.route('/')
+def serve_index():
+    return send_from_directory('frontend', 'index.html')
 
-    for name, model in models.items():
-        model.fit(X_train_scaled, y_train)
-        preds = model.predict(X_test_scaled)
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory('frontend', path)
 
-        metrics[name] = {
-            'RMSE': np.sqrt(mean_squared_error(y_test, preds)),
-            'MAE': mean_absolute_error(y_test, preds),
-            'R2': r2_score(y_test, preds)
-        }
+@app.route('/api/data', methods=['GET'])
+def get_data():
+    if DATA is None:
+        return jsonify({'error': 'Dataset not loaded'}), 500
+    # Sample 400 for visualization scatter plot
+    sample = DATA.sample(n=min(400, len(DATA)), random_state=42).sort_values(by='hour')
+    return jsonify(sample[['hour', 'traffic_volume', 'temp_c', 'clouds_all', 'rain_1h']].to_dict(orient='records'))
 
-        trained_models[name] = model
+@app.route('/api/pca', methods=['GET'])
+def get_pca():
+    if PCA_RESULT is None:
+        return jsonify({'error': 'PCA not computed'}), 500
+    return jsonify({
+        'scatter_data': [{'pc1': pc1, 'pc2': pc2} for pc1, pc2 in zip(PCA_RESULT['pc1'], PCA_RESULT['pc2'])],
+        'variance_ratio': PCA_RESULT['variance_ratio']
+    })
 
-    return trained_models, metrics, scaler, features
+@app.route('/api/predict', methods=['POST'])
+def predict():
+    if LR_MODEL is None:
+        return jsonify({'error': 'Model not trained'}), 500
+    data = request.json
+    try:
+        hour = float(data.get('hour', 12))
+        temp_c = float(data.get('temperature', 20))
+        clouds = float(data.get('clouds_all', 60))
+        rain = float(data.get('rain_1h', 0))
+        
+        input_data = [[hour, temp_c, clouds, rain]]
+        pred = LR_MODEL.predict(input_data)[0]
+        pred = max(0, int(pred)) # No negative traffic
+        
+        # Calculate PCA for the predicted point using the new schema
+        input_df = pd.DataFrame(input_data, columns=['hour', 'temp_c', 'clouds_all', 'rain_1h'])
+        scaled_input = SCALER.transform(input_df)
+        pca_coords = PCA_MODEL.transform(scaled_input)[0]
 
-# --- RUN APP ---
-st.title("🚦 Urban Traffic Flow Optimization System")
+        return jsonify({
+            'prediction': pred,
+            'pca_pc1': float(pca_coords[0]),
+            'pca_pc2': float(pca_coords[1])
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
-df = load_and_preprocess_data()
-models, metrics, scaler, feature_cols = train_models(df)
+@app.route('/api/insights', methods=['GET'])
+def get_insights():
+    if DATA is None:
+        return jsonify({'error': 'Data missing'}), 500
+    
+    peak_hour = DATA.groupby('hour')['traffic_volume'].mean().idxmax()
+    return jsonify({
+        'peak_hour': int(peak_hour),
+        'avg_traffic': int(DATA['traffic_volume'].mean()),
+        'total_records': len(DATA)
+    })
 
-st.success("✅ App loaded successfully!")
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
